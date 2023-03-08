@@ -7,6 +7,7 @@ from pyproj import CRS
 from pyproj.aoi import AreaOfInterest
 from pyproj.database import query_utm_crs_info
 from pyproj import Transformer
+import time
 
 # ---------------------------------------------------------------------------------------------------------------
 #                 First time use will open a webpage to authenticate the machine locally
@@ -78,25 +79,37 @@ def img_scaleTrim(image, band, mode, proj, scale, pts):
     reducer = "ee.Reducer."+ mode +"()"
 
     # Resample the image to assign custom scale
-    imageResampled = image \
-        .reduceResolution(reducer= eval(reducer), maxPixels = 5000) \
-        .reproject(crs='EPSG:4326', scale=scale)
 
-    # Extract the bounding region from the locations
-    aoi = pts_bbox(pts)
+    attempt_num = 5
 
-    # Sample the image within the region
-    rec_sample = imageResampled.sampleRectangle(region=aoi, defaultValue=0)
+    for i in range(attempt_num):
+        try:
+            imageResampled = image \
+                .reduceResolution(reducer= eval(reducer), bestEffort=True, maxPixels = 5000) \
+                .reproject(crs='EPSG:4326', scale=scale)
 
-    # Prepare the outputs
-    np_values = np.array(rec_sample.get(band).getInfo())
-    values = np_values.flatten().tolist()
+            # Extract the bounding region from the locations
+            aoi = pts_bbox(pts)
 
-    # Change from pixel to node (vertices)
-    H = np_values.shape[0] -1
-    W = np_values.shape[1] -1
+            # Sample the image within the region
+            rec_sample = imageResampled.sampleRectangle(region=aoi, defaultValue=0)
 
-    return values,W,H;
+            # Prepare the outputs
+            np_values = np.array(rec_sample.get(band).getInfo())
+            values = np_values.flatten().tolist()
+
+            # Change from pixel to node (vertices)
+            H = np_values.shape[0] 
+            W = np_values.shape[1]  
+
+            return values,W,H
+        except:
+            time.sleep(0.5) # wait 0.5 s before new request attempt
+
+    values = np.zeros(100).flatten().tolist() # send zeros in case failure
+    return values, 10,10
+    
+
 
 # App Components -----------------------------------------------------------------------------------------------
 
@@ -124,7 +137,45 @@ def ee_image(layer,bands,mode,scale,pts):
     # Extract original projection
     proj = image.projection()
 
-    return img_scaleTrim(image, bands, mode, proj, scale, pts);
+    return img_scaleTrim(image, bands, mode, proj, scale, pts)
+
+
+@hops.component(
+    "/ee_from_image_collection",
+    inputs=[
+        hs.HopsString("layer", "layer"),
+        hs.HopsString("bands", "bands"),
+        hs.HopsString("date_start", "date_start", default="None"),
+        hs.HopsString("date_end", "date_end", default="None"),
+        hs.HopsString("coll_reducer","coll_reducer", "coll_reducer mode to be applied. Default is mean", default="mean"),
+        hs.HopsString("mode","mode", "resampling mode to be applied. Default is mean", default="mean"),
+        hs.HopsNumber("scale", "scale"),
+        hs.HopsPoint("pts","pts","the bounding box representing the area of analaysis. Note, provide it in the following order: min.Lon(X), max.Lon(X), min.Lat(Y), max.Lat(Y) aka LeftBottom, RightBottom, RightTop, LeftTop", hs.HopsParamAccess.LIST)],
+    outputs=[
+        hs.HopsNumber("values"),
+        hs.HopsNumber("W"),
+        hs.HopsNumber("H")
+    ],
+)
+
+def ee_from_image_collection(layer,bands, date_start, date_end, coll_reducer,mode,scale,pts):
+    pass
+
+    # Select image collection
+    image_col = ee.ImageCollection(layer)
+
+    # filter date if available:
+    if date_start != "None" or date_end != "None":
+        image_col = image_col.filter(ee.Filter.date(date_start, date_end))
+
+    image_col = eval(f"image_col.{coll_reducer}()")
+
+    image_col = image_col.setDefaultProjection(crs='EPSG:4326', scale=scale)
+
+    # Extract original projection
+    proj = image_col.projection()
+
+    return img_scaleTrim(image_col, bands, mode, proj, scale, pts)
 
 
 @hops.component(
@@ -156,7 +207,7 @@ def ee_filterDate(layer,dates):
         layers.append(layer)
         days.append(day)
 
-    return (layers, days);
+    return (layers, days)
 
 
 @hops.component(
@@ -172,7 +223,7 @@ def ee_filterDate(layer,dates):
         hs.HopsNumber("values"),
         hs.HopsNumber("W"),
         hs.HopsNumber("H")
-    ],
+    ],  
 )
 
 def ee_ND(layer,band1,band2,mode,scale,pts):
@@ -209,6 +260,7 @@ def ee_ND(layer,band1,band2,mode,scale,pts):
 
 def ee_cumCost(layer,cost,sources,maxd,scale,pts):
 
+
     # Compute the centroid location
     geom_source = pts_multipts(sources)
 
@@ -229,6 +281,7 @@ def ee_cumCost(layer,cost,sources,maxd,scale,pts):
     costResample = cost \
         .reduceResolution(**{
         'reducer': ee.Reducer.mean(),
+        'bestEffort' :True,
         'maxPixels': 5000
         }) \
         .reproject(**{
@@ -296,6 +349,7 @@ def ee_cumCostExtra(layer,cost,remap,default,paint,val,sources,maxd,scale,pts):
     costResample = cost \
         .reduceResolution(**{
         'reducer': ee.Reducer.mean(),
+        'bestEffort' :True,
         'maxPixels': 5000
         }) \
         .reproject(**{
@@ -374,10 +428,10 @@ def reproject_UTM(pts, bool):
 
         pts_UTM.append(str("{" + str(p_UTM[0]) +"," + str(p_UTM[1]) + ",0}"))
 
-    return pts_UTM;
+    return pts_UTM
 
 
 # Run App ------------------------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
